@@ -12,7 +12,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:pointycastle/export.dart' as pc;
 import 'package:record/record.dart';
-import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'dart:io';
 import 'bb84_simulator.dart';
 
@@ -85,132 +85,21 @@ class _DialerScreenState extends State<DialerScreen> with WidgetsBindingObserver
   StreamSubscription<Amplitude>? _amplitudeSubscription;
   StreamSubscription<Uint8List>? _audioChunkSubscription;
 
-  // Audio Playback
-  AudioPlayer? _audioPlayer;
-  StreamSubscription? _playerCompleteSubscription; // For player completion
-  StreamSubscription? _playerStateSubscription; // For player state
+
   bool _isAudioInitialized = false;
   bool _isSpeakerphoneOn = false;
-  bool _isPlayingAudio = false;
+  bool _isPcmSoundPlaying  = false;
   // --- ADD THESE LINES ---
-  final Queue<Uint8List> _audioBuffer = Queue<Uint8List>();
-  bool _isProcessingBuffer = false; // To prevent concurrent processing starts
+  final Queue<List<int>> _audioBuffer = Queue<List<int>>();
   // --- END OF ADDED LINES ---
   bool _isRecording = false;
-  Timer? _audioRecoveryTimer;
-
+  bool _isPlayingAudio = false;
 
 
 // --- ADD THIS NEW FUNCTION ---
 // Place it somewhere logical, e.g., after _initializeAudioPlayback or _handleEncryptedAudioData
 // Place this function inside the _DialerScreenState class
 
-Uint8List _addWavHeader(Uint8List pcmData) {
-  const int numChannels = 1;
-  const int sampleRate = recordSampleRate; // Use your constant
-  const int bitsPerSample = 16;
-  const int byteRate = sampleRate * numChannels * bitsPerSample ~/ 8;
-  const int blockAlign = numChannels * bitsPerSample ~/ 8;
-
-  final int pcmDataLength = pcmData.length;
-  final int fileSize = pcmDataLength + 44; // 44 bytes for the header
-
-  final ByteData header = ByteData(44);
-
-  // RIFF chunk descriptor
-  header.setUint8(0, 0x52); // 'R'
-  header.setUint8(1, 0x49); // 'I'
-  header.setUint8(2, 0x46); // 'F'
-  header.setUint8(3, 0x46); // 'F'
-  header.setUint32(4, fileSize - 8, Endian.little); // ChunkSize
-  header.setUint8(8, 0x57); // 'W'
-  header.setUint8(9, 0x41); // 'A'
-  header.setUint8(10, 0x56); // 'V'
-  header.setUint8(11, 0x45); // 'E'
-
-  // fmt sub-chunk
-  header.setUint8(12, 0x66); // 'f'
-  header.setUint8(13, 0x6D); // 'm'
-  header.setUint8(14, 0x74); // 't'
-  header.setUint8(15, 0x20); // ' '
-  header.setUint32(16, 16, Endian.little); // Subchunk1Size (16 for PCM)
-  header.setUint16(20, 1, Endian.little); // AudioFormat (1 for PCM)
-  header.setUint16(22, numChannels, Endian.little); // NumChannels
-  header.setUint32(24, sampleRate, Endian.little); // SampleRate
-  header.setUint32(28, byteRate, Endian.little); // ByteRate
-  header.setUint16(32, blockAlign, Endian.little); // BlockAlign
-  header.setUint16(34, bitsPerSample, Endian.little); // BitsPerSample
-
-  // data sub-chunk
-  header.setUint8(36, 0x64); // 'd'
-  header.setUint8(37, 0x61); // 'a'
-  header.setUint8(38, 0x74); // 't'
-  header.setUint8(39, 0x61); // 'a'
-  header.setUint32(40, pcmDataLength, Endian.little); // Subchunk2Size
-
-  // Combine header and PCM data
-  final Uint8List wavData = Uint8List(fileSize);
-  wavData.setRange(0, 44, header.buffer.asUint8List());
-  wavData.setRange(44, fileSize, pcmData);
-
-  return wavData;
-}
-
-// --- Revised _playNextChunkFromBuffer ---
-Future<void> _playNextChunkFromBuffer() async {
-  // Prevent concurrent starts IF ALREADY PROCESSING
-  // Use a local variable check first for minor efficiency gain
-  if (_isProcessingBuffer) {
-     // print(">>>> Playback attempt skipped: Already processing another chunk.");
-     return;
-  }
-
-  // Check if okay to proceed (buffer has data, player ready)
-  if (_audioBuffer.isEmpty || _audioPlayer == null || !_isAudioInitialized) {
-    // print(">>>> Playback skipped: Buffer empty or player not ready.");
-    // Ensure processing flag is false if we decided not to play.
-    if (mounted && _isProcessingBuffer) {
-        // print(">>>> Sanity check: Resetting processing flag as buffer is empty/player not ready.");
-        // This case shouldn't happen if entry condition `!_isProcessingBuffer` is met, but for safety:
-        setStateIfMounted(() => _isProcessingBuffer = false);
-    }
-    return;
-  }
-
-  // --- Set flag: we are NOW starting to process a chunk ---
-  // This state change MUST happen before any `await`
-  setStateIfMounted(() => _isProcessingBuffer = true);
-  // print(">>>> Starting to process next chunk. Setting processing flag to true. Buffer size: ${_audioBuffer.length}");
-
-  try {
-    final nextPcmChunk = _audioBuffer.removeFirst();
-    if (nextPcmChunk.isEmpty) {
-      print(">>>> Skipping empty chunk from buffer.");
-      // Reset flag *immediately* since we didn't play anything.
-      setStateIfMounted(() => _isProcessingBuffer = false);
-      // Try the *next* one without waiting for onComplete
-      // Use a microtask to avoid deep recursion issues if many empty chunks exist
-      Future.microtask(_playNextChunkFromBuffer);
-      return;
-    }
-
-    final wavChunk = _addWavHeader(nextPcmChunk);
-    // print(">>>> Playing next chunk (PCM: ${nextPcmChunk.length}, WAV: ${wavChunk.length} bytes). Buffer size now: ${_audioBuffer.length}");
-    // print(">>>> Calling _audioPlayer.play(BytesSource)...");
-
-    await _audioPlayer!.play(BytesSource(wavChunk));
-    // print(">>>> _audioPlayer.play() call completed. isProcessing should be TRUE. Waiting for onComplete or onError...");
-    // Playback initiated. onPlayerComplete or onError will fire next and handle resetting the flag.
-    // *** DO NOT reset the flag here ***
-
-  } catch (e, s) {
-    print("!!!! Error playing next chunk from buffer: $e");
-    print("!!!! Stack trace: $s");
-    _audioBuffer.clear(); // Clear buffer on playback error
-    // Reset flag on error
-    setStateIfMounted(() => _isProcessingBuffer = false);
-  }
-}
 
 
   @override
@@ -218,7 +107,6 @@ Future<void> _playNextChunkFromBuffer() async {
     super.initState();
     _audioRecorder = AudioRecorder();
     WidgetsBinding.instance.addObserver(this);
-    _initializeAudioPlayback();
     _setupRecorderListeners();
     _loadOrGenerateMyId().then((_) {
       if (_myId != 'Loading...' && _myId.isNotEmpty) {
@@ -260,7 +148,7 @@ Future<void> _playNextChunkFromBuffer() async {
       print(
           ">>>> App paused/inactive/detached/hidden. Stopping media streams if active.");
       if (_isRecording) _stopMicStream();
-      if (_isPlayingAudio) _stopAudioPlayer();
+      if (_isPcmSoundPlaying) _stopPcmSoundPlayback();
     }
   }
 
@@ -270,16 +158,15 @@ Future<void> _playNextChunkFromBuffer() async {
     WidgetsBinding.instance.removeObserver(this);
     _channel?.sink.close(1000, "Client disposed");
     _closeWebRTCSession(notifyServer: false);
-    _audioRecoveryTimer?.cancel();
+
     _recordStateSubscription?.cancel();
     _amplitudeSubscription?.cancel();
     _audioRecorder.dispose();
     _audioChunkSubscription?.cancel();
 
-    _playerCompleteSubscription?.cancel(); // Cancel player listener
-    _playerStateSubscription?.cancel();   // Cancel player listener
-    _audioPlayer?.dispose();
-    _audioPlayer = null;
+    // Add FlutterPcmSound cleanup
+    print(">>>> Releasing FlutterPcmSound resources...");
+    FlutterPcmSound.release(); // Important!
 
     print(">>>> DialerScreen disposed.");
     super.dispose();
@@ -755,7 +642,7 @@ Future<void> _playNextChunkFromBuffer() async {
 
     if (!_isAudioInitialized) {
       print(">>>> Audio playback not initialized, initializing now...");
-      await _initializeAudioPlayback();
+      await _initializePcmSound();
     }
 
     print(">>>> Creating RTCPeerConnection...");
@@ -912,30 +799,7 @@ Future<void> _playNextChunkFromBuffer() async {
     // --- End FIX 2 ---
   }
 
-  Future<void> _checkAndRecoverAudioChain() async {
-  // Conditions for recovery:
-  // 1. Buffer is not empty.
-  // 2. We are *not* currently in the middle of the play-chain (`_isProcessingBuffer` is false)
-  //    OR we *think* we are processing, but the player state says it's not actually playing.
-  final playerState = _audioPlayer?.state; // Get current state
 
-  if (_audioBuffer.isNotEmpty &&
-      (!_isProcessingBuffer || (_isProcessingBuffer && playerState != PlayerState.playing)))
-  {
-    print(">>>> RECOVERY DETECTED: Buffer: ${_audioBuffer.length}, Processing: $_isProcessingBuffer, PlayerState: $playerState. Attempting restart.");
-
-    // Force reset of processing state JUST IN CASE it was stuck true.
-    if (_isProcessingBuffer) {
-       setStateIfMounted(() => _isProcessingBuffer = false);
-       // Short delay to allow state update before trying to play again
-       await Future.delayed(Duration(milliseconds: 50));
-    }
-
-    // Attempt to restart the chain by playing the next chunk
-    _playNextChunkFromBuffer();
-  }
-}
-  
   Future<void> _handleWebRTCSignal(Map<String, dynamic> signal) async {
    final type = signal['type'] as String?;
    print(">>>> Handling received WebRTC signal (Type: $type)");
@@ -1038,7 +902,40 @@ Future<void> _playNextChunkFromBuffer() async {
       print("!!!! Cannot send WebRTC signal: remoteUserId is null.");
     }
   }
+// This function replaces _playNextChunkFromBuffer logic
+Future<void> _onFeedPcmSound(int remainingFrames) async {
+  // This callback runs frequently when playing. Keep it efficient.
+  // Avoid heavy computations or long async operations here if possible.
+print(">>>> _onFeedPcmSound CALLED. Remaining frames hint: $remainingFrames. Buffer size: ${_audioBuffer.length}");
 
+  // Check if we actually have data buffered from the network
+  if (_audioBuffer.isNotEmpty) {
+    // Get the next chunk (already converted to List<int>)
+    final List<int> pcmChunk = _audioBuffer.removeFirst();
+
+    print(">>>> Feeding ${pcmChunk.length} samples. Buffer size now: ${_audioBuffer.length}. Remaining frames hint: $remainingFrames");
+
+    try {
+      // Feed the PCM data to the plugin
+      // PcmArrayInt16.fromList expects List<int>
+      await FlutterPcmSound.feed(PcmArrayInt16.fromList(pcmChunk));
+      
+    } catch (e, s) {
+      print("!!!! Error feeding PCM data: $e");
+      print("!!!! Stack trace: $s");
+      // Consider clearing the buffer or stopping playback on feed errors
+      _stopPcmSoundPlayback(); // Example: Stop on error
+    }
+  } else {
+    // Buffer is empty. Don't feed anything.
+    // The plugin will keep calling the callback until feedThreshold is reached again
+    // or until the buffer runs completely dry.
+    // print(">>>> PCM Feed callback: Buffer empty. Waiting for data.");
+    // Optionally feed silence here if desired, but usually not necessary:
+    // final List<int> silence = List<int>.filled(2048, 0); // Example: Feed ~128ms silence
+    // await FlutterPcmSound.feed(PcmArrayInt16.fromList(silence));
+  }
+}
   // --- Audio Capture (Using record), Encryption, Sending ---
   Future<void> _startMicStream(RTCDataChannel channel) async {
     if (_isRecording) {
@@ -1080,7 +977,7 @@ Future<void> _playNextChunkFromBuffer() async {
 
       _audioChunkSubscription = stream.listen(
         (audioChunk) {
-          print(">>>> Audio chunk received: ${audioChunk.length} bytes");
+          // print(">>>> Audio chunk received: ${audioChunk.length} bytes");
           if (!mounted) {
             print(
                 "!!!! Audio chunk listener fired but widget not mounted. Cancelling subscription.");
@@ -1257,106 +1154,113 @@ Future<void> _playNextChunkFromBuffer() async {
   }
 
 
-Future<void> _initializeAudioPlayback() async {
-  if (_audioPlayer != null) {
-    print(">>>> Audio playback already initialized.");
+Future<void> _initializePcmSound() async {
+  if (_isAudioInitialized) {
+     print(">>>> FlutterPcmSound already initialized setup.");
+     return; // Or call release() and setup() again if re-initialization is needed
+  }
+  print(">>>> Initializing FlutterPcmSound...");
+  try {
+    // Set log level for debugging if needed
+    FlutterPcmSound.setLogLevel(LogLevel.verbose); // Or LogLevel.error
+
+    // Setup the audio parameters
+    await FlutterPcmSound.setup(
+      sampleRate: recordSampleRate, // Use your consistent sample rate
+      channelCount: 1, // Mono audio
+    );
+
+    // Set the buffer threshold. Lower values mean lower latency but more frequent callbacks.
+    // Start with sampleRate / 10 (100ms buffer) and tune down if needed.
+    // Example: 16000 / 10 = 1600 frames. Might need lower (e.g., 4000 or 2000).
+    // The value is in *frames*.
+    int feedThreshold = recordSampleRate ~/ 10; // ~100ms buffer initially
+    print(">>>> Setting PCM feed threshold to: $feedThreshold frames");
+    await FlutterPcmSound.setFeedThreshold(feedThreshold);
+
+    // Set the callback that provides audio data
+    FlutterPcmSound.setFeedCallback(_onFeedPcmSound); // <-- Link to the new callback
+
+    _isAudioInitialized = true; // Mark as initialized
+    print(">>>> FlutterPcmSound initialized successfully.");
+
+    // Apply speakerphone setting if needed (using your existing Helper)
+    await _setSpeakerphone(_isSpeakerphoneOn);
+
+  } catch (e, s) {
+    print("!!!! Failed to initialize FlutterPcmSound: $e");
+    print("!!!! Stack trace: $s");
+    _isAudioInitialized = false;
+    setStateIfMounted(() {
+      _callStatus = "Audio Init Error";
+    });
+  }
+}
+
+void _startPcmSoundPlayback() {
+  if (!_isAudioInitialized) {
+     print("!!!! Cannot start PCM sound: Not initialized.");
+     return;
+  }
+  if (_isPcmSoundPlaying) {
+    print(">>>> PCM sound already playing (callback likely active).");
+    // If it's already "playing", the callback is set, and it will pull data when needed.
+    // Calling the callback again might not be harmful but isn't strictly necessary
+    // unless you want to force an immediate check even if the threshold isn't met.
+    // For simplicity, we can just return if already marked as playing.
     return;
   }
-  print(">>>> Initializing audio playback (AudioPlayer)...");
-
-  // --- Add Recovery Timer ---
-  // (Ensure it's cancelled in dispose and _closeWebRTCSession if needed)
-  _audioRecoveryTimer?.cancel(); // Cancel any existing timer
-  _audioRecoveryTimer = Timer.periodic(Duration(seconds: 3), (_) {
-    // Only run recovery if in call, QKD succeeded, and buffer has data
-    if (_isInCall && _qkdState == QkdState.success && _audioBuffer.isNotEmpty) {
-       _checkAndRecoverAudioChain();
-    }
-  });
-  // --- End Add Recovery Timer ---
-
-
-  _audioPlayer = AudioPlayer();
-  _audioPlayer!.setReleaseMode(ReleaseMode.stop); // Keep using stop for manual queue
-
-  print(">>>> Forcing speakerphone ON using AudioContext...");
+  print(">>>> Triggering FlutterPcmSound playback by calling feed callback...");
   try {
-    await _audioPlayer!.setAudioContext(AudioContext(
-      android: AudioContextAndroid(
-        isSpeakerphoneOn: true,
-        stayAwake: true,
-        contentType: AndroidContentType.speech,
-        usageType: AndroidUsageType.voiceCommunication,
-        audioFocus: AndroidAudioFocus.gain,
-      ),
-      // ios: ... // Add iOS context if needed
-    ));
-    print(">>>> AudioContext set for speakerphone.");
-    setStateIfMounted(() => _isSpeakerphoneOn = true);
-  } catch (e) {
-    print("!!!! Failed to set AudioContext: $e");
-  }
+      // --- REPLACEMENT ---
+      // Instead of: FlutterPcmSound.start();
+      // Directly call the feed callback to initiate the process.
+      // Pass 0 for remainingFrames as per the documentation's equivalence note.
+      FlutterPcmSound.play();
+      _onFeedPcmSound(0);
+      // --- END REPLACEMENT ---
 
-  // Cancel previous subscriptions (safety)
-  await _playerStateSubscription?.cancel();
-  await _playerCompleteSubscription?.cancel();
-
-  _playerStateSubscription = _audioPlayer!.onPlayerStateChanged.listen(
-    (state) {
-      // print(">>>> AudioPlayer state changed: $state. isProcessing: $_isProcessingBuffer");
-      // Update UI state
-      if (mounted) {
-        final bool nowPlaying = (state == PlayerState.playing);
-        if (_isPlayingAudio != nowPlaying) {
-          setState(() {
-            _isPlayingAudio = nowPlaying;
-          });
-        }
-      }
-      // Handle unexpected stops
-      if ((state == PlayerState.stopped || state == PlayerState.completed) &&
-          _isProcessingBuffer && // If we *thought* we were playing
-          _audioBuffer.isNotEmpty) { // And there's more data
-          print("!!!! Player stopped/completed unexpectedly while processing buffer. Buffer: ${_audioBuffer.length}. Attempting recovery.");
-          // This might indicate onComplete didn't fire or was too late.
-          // The recovery timer will likely handle this, but we can try here too.
-          setStateIfMounted(() => _isProcessingBuffer = false); // Reset flag
-          _playNextChunkFromBuffer(); // Try to restart the chain immediately
-      }
-    },
-    onError: (msg) {
-      print('!!!! AudioPlayer error: $msg');
+      // We assume playback will start if the callback finds data.
+      // The actual audio playing state depends on data being fed successfully.
       setStateIfMounted(() {
-        _isPlayingAudio = false;
-        if (_isProcessingBuffer) {
-             print("!!!! AudioPlayer error occurred while processing buffer. Resetting flag.");
-             _isProcessingBuffer = false; // *** Crucial: Reset flag on error ***
-        }
+        _isPcmSoundPlaying = true; // Mark that we have initiated playback intent
+        _isPlayingAudio = true;    // Update UI state accordingly
       });
-      _audioBuffer.clear(); // Clear buffer on error
-      // Consider stopping completely or attempting recovery after a delay
-      // _stopAudioPlayer();
-    },
-  );
+      print(">>>> FlutterPcmSound playback initiated via manual callback trigger.");
 
-  _playerCompleteSubscription = _audioPlayer!.onPlayerComplete.listen((_) {
-    // print(">>>> AudioPlayer playback complete (onPlayerComplete). Buffer: ${_audioBuffer.length}");
-    final bool wasProcessing = _isProcessingBuffer; // Log previous state
-    setStateIfMounted(() => _isProcessingBuffer = false);
-    // print(">>>> Playback complete. Reset processing flag (was $wasProcessing). Buffer size: ${_audioBuffer.length}");
+  } catch (e, s) {
+      // This catch might not be as relevant now since the error would likely
+      // occur inside _onFeedPcmSound during the FlutterPcmSound.feed call.
+      print("!!!! Error occurred during initial manual feed callback trigger: $e");
+      print("!!!! Stack trace: $s");
+      // Consider resetting state if the initial trigger fails critically
+      setStateIfMounted(() {
+         _isPcmSoundPlaying = false;
+         _isPlayingAudio = false;
+      });
+  }
+}
 
-    // Immediately try to play the next chunk *if available*
-    if (_audioBuffer.isNotEmpty) {
-      // print(">>>> onPlayerComplete: Buffer not empty, triggering next playback.");
-      _playNextChunkFromBuffer();
-    } else {
-      // print(">>>> onPlayerComplete: Buffer empty, playback chain naturally stops.");
-    }
+
+void _stopPcmSoundPlayback() {
+  if (!_isPcmSoundPlaying && _audioBuffer.isEmpty) {
+    print(">>>> PCM sound already stopped or idle.");
+    return;
+  }
+  print(">>>> Stopping FlutterPcmSound playback (disabling callback)...");
+
+  // Provide an empty callback instead of null
+  FlutterPcmSound.setFeedCallback((int remainingFrames) {
+    // Do nothing
   });
 
-  _isAudioInitialized = true;
-  print(">>>> Audio playback initialized successfully.");
-  await _setSpeakerphone(_isSpeakerphoneOn); // Apply initial state
+  _audioBuffer.clear(); // Clear any remaining buffered data
+
+  setStateIfMounted(() {
+    _isPcmSoundPlaying = false;
+    _isPlayingAudio = false; // Update UI state
+  });
+  print(">>>> FlutterPcmSound feed callback disabled, buffer cleared.");
 }
 
 
@@ -1366,9 +1270,8 @@ void _handleEncryptedAudioData(Uint8List encryptedData) {
     print("!!!! Decrypt Error: Shared key is null.");
     return;
   }
-  // ... (rest of decryption logic remains the same) ...
+  // ... (decryption setup remains the same) ...
   try {
-    // ... decryption ...
     final nonce = encryptedData.sublist(0, gcmNonceLengthBytes);
     final ciphertextWithTag = encryptedData.sublist(gcmNonceLengthBytes);
 
@@ -1379,65 +1282,48 @@ void _handleEncryptedAudioData(Uint8List encryptedData) {
 
     Uint8List decryptedBytes = cipher.process(ciphertextWithTag);
 
-
+    // --- CONVERSION STEP ---
     if (decryptedBytes.isNotEmpty) {
-      _audioBuffer.add(decryptedBytes);
-       // print(">>>> Chunk added to buffer. Size: ${_audioBuffer.length}. isProcessing: $_isProcessingBuffer");
-
-      // --- Kick off playback ONLY if the player is currently idle ---
-      // This check remains critical to prevent multiple playback chains starting.
-      if (!_isProcessingBuffer) {
-          // print(">>>> Player is idle (_isProcessingBuffer is false), attempting to start playback from buffer.");
-          _playNextChunkFromBuffer();
-      } else {
-          // print(">>>> Player is busy (_isProcessingBuffer is true), chunk queued. onComplete will handle next play.");
+      // Convert Uint8List (bytes) to List<int> (int16 samples)
+      // Assumes 16-bit Little Endian PCM data, which is common. Verify if your source is different.
+      List<int> pcmSamples = [];
+      ByteData byteData = ByteData.view(decryptedBytes.buffer, decryptedBytes.offsetInBytes, decryptedBytes.lengthInBytes);
+      for (int i = 0; i < decryptedBytes.lengthInBytes; i += 2) {
+        // Read two bytes as a signed 16-bit integer (little-endian)
+        pcmSamples.add(byteData.getInt16(i, Endian.little));
       }
+
+      
+      if (pcmSamples.isNotEmpty) {
+         _audioBuffer.add(pcmSamples);
+        //  print(">>>> PCM Chunk (${pcmSamples.length} samples) added to buffer. Size: ${_audioBuffer.length}.");
+
+         // --- IMPORTANT: NO DIRECT PLAYBACK TRIGGER ---
+         // We no longer call _playNextChunkFromBuffer() here.
+         // The _onFeedPcmSound callback will automatically pull data
+         // from _audioBuffer when FlutterPcmSound needs it.
+
+         // --- Start playback if it hasn't started yet ---
+         // This ensures playback begins once the first chunk arrives.
+         if (!_isPcmSoundPlaying && _isAudioInitialized) {
+            print(">>>> First audio chunk received, starting FlutterPcmSound playback.");
+            _startPcmSoundPlayback();
+            _onFeedPcmSound(0);
+         }
+
+      } else {
+         print(">>>> Decryption resulted in empty PCM samples after conversion, discarding.");
+      }
+
     } else {
-       print(">>>> Decryption resulted in empty data, discarding.");
+       print(">>>> Decryption resulted in empty byte data, discarding.");
     }
 
   } on pc.InvalidCipherTextException catch (e) {
     print("!!!! Decryption failed (InvalidCipherTextException): Authentication tag check failed. $e");
-    // Don't clear buffer here, maybe just one corrupted packet
   } catch (e, s) {
-    print("!!!! Decryption or Buffer Add failed: $e");
+    print("!!!! Decryption or Conversion/Buffer Add failed: $e");
     print("!!!! Stack trace: $s");
-    // Consider clearing buffer on major errors? Depends on desired behaviour.
-    // _audioBuffer.clear();
-    // setStateIfMounted(() => _isProcessingBuffer = false);
-  }
-}
-
-
-Future<void> _stopAudioPlayer() async {
-  print(">>>> Stopping audio player and clearing buffer...");
-  _audioBuffer.clear(); // Clear any pending chunks
-
-  // Reset the processing flag *before* stopping the player
-  final wasProcessing = _isProcessingBuffer;
-  setStateIfMounted(() => _isProcessingBuffer = false);
-  print(">>>> Reset processing flag in stopAudioPlayer (was $wasProcessing).");
-
-  // Stop the recovery timer when stopping playback
-  _audioRecoveryTimer?.cancel();
-  _audioRecoveryTimer = null;
-
-  if (_audioPlayer != null) {
-    try {
-      await _audioPlayer!.stop();
-      print(">>>> Audio player stopped successfully via stop().");
-      // State listener should update _isPlayingAudio to false eventually.
-    } catch (e) {
-      print("!!!! Error stopping audio player: $e");
-    }
-  } else {
-    print(">>>> Audio player was already null.");
-  }
-
-  // Ensure UI reflects stopped state immediately as a fallback
-  if (mounted && _isPlayingAudio) {
-    print(">>>> Manually setting _isPlayingAudio to false in stopAudioPlayer.");
-    setState(() => _isPlayingAudio = false);
   }
 }
 
@@ -1494,7 +1380,6 @@ Future<void> _stopAudioPlayer() async {
   // --- Cleanup Logic ---
   Future<void> _closeWebRTCSession({required bool notifyServer}) async {
     print(">>>> Entering _closeWebRTCSession (Notify Server: $notifyServer)...");
-    _audioRecoveryTimer?.cancel();
     _queuedWebRTCSignals.clear(); 
     if (_peerConnection == null &&
         _dataChannel == null &&
@@ -1516,8 +1401,7 @@ Future<void> _stopAudioPlayer() async {
     }
 
     await _stopMicStream();
-    await _stopAudioPlayer();
-
+    _stopPcmSoundPlayback();
     try {
       if (_dataChannel != null) {
         print(">>>> Closing local data channel (ID: ${_dataChannel?.id})...");
@@ -1570,50 +1454,57 @@ Future<void> _stopAudioPlayer() async {
     print(">>>> _closeWebRTCSession finished.");
   }
 
-  void _resetCallState() {
-    print(">>>> Resetting call state...");
-    _queuedWebRTCSignals.clear();
-    bool wasInCall = _isInCall;
+void _resetCallState() {
+  print(">>>> Resetting call state...");
 
-    _qkdSimulator?.reset();
-    _qkdSimulator = null;
-    _sharedKey = null;
+  // --- Core Call Logic Reset ---
+  bool wasInCall = _isInCall; // Keep track if we were actually in a call
+  _queuedWebRTCSignals.clear(); // Clear any pending WebRTC signals
+  _isInCall = false; // Mark as not in call
+  _remoteUserId = null; // Forget the remote user
 
-    if (mounted) {
-      setState(() {
-        bool hadError = _callStatus.contains("Error") ||
-            _callStatus.contains("Failed") ||
-            _callStatus.contains("Permission");
-        bool wasDisconnected =
-            _callStatus.contains("disconnect") || _callStatus.contains("Lost");
-        bool wasEnded = _callStatus.contains("ended by");
-        bool wasRejected = _callStatus.contains("rejected");
+  // --- QKD State Reset ---
+  _qkdSimulator?.reset(); // Reset the simulator if it exists
+  _qkdSimulator = null;
+  _sharedKey = null; // Clear the derived key
+  _qkdState = QkdState.idle; // Set QKD state back to idle
 
-        _isInCall = false;
-        _remoteUserId = null;
-        _qkdState = QkdState.idle;
+  // --- Audio State Reset (within mounted check) ---
+  if (mounted) {
+    setState(() {
+      // Preserve specific end-call statuses
+      bool hadError = _callStatus.contains("Error") || _callStatus.contains("Failed") || _callStatus.contains("Permission");
+      bool wasDisconnected = _callStatus.contains("disconnect") || _callStatus.contains("Lost");
+      bool wasEnded = _callStatus.contains("ended by");
+      bool wasRejected = _callStatus.contains("rejected");
 
-        if (!wasInCall ||
-            (!hadError && !wasDisconnected && !wasEnded && !wasRejected)) {
-          _callStatus = 'Ready';
-        } else {
-          print(">>>> Preserving call status: $_callStatus");
-        }
-        _isRecording = false;
-        _isPlayingAudio = false;
-      });
-    } else {
-      _isInCall = false;
-      _remoteUserId = null;
-      _qkdState = QkdState.idle;
-      _sharedKey = null;
-      _isRecording = false;
+      // Only reset status to 'Ready' if the call ended normally or wasn't really active
+      if (!wasInCall || (!hadError && !wasDisconnected && !wasEnded && !wasRejected)) {
+        _callStatus = 'Ready'; // Reset call status message
+      } else {
+        print(">>>> Preserving call status: $_callStatus");
+        // Otherwise, keep the existing status (e.g., "Call ended by peer", "Connection Error")
+      }
+
+      // --- Flags related to media ---
+      _isRecording = false; // Ensure recording flag is false (stopMicStream should have handled the actual stop)
+
+      // ADDED/MODIFIED: Reset both PCM playback state and UI state flag
+      _isPcmSoundPlaying = false;
       _isPlayingAudio = false;
-    }
-    print(
-        ">>>> Call state reset complete. InCall: $_isInCall, Status: $_callStatus");
+
+    });
+  } else {
+    // If not mounted, just update the variables directly
+    // Note: _callStatus preservation logic doesn't apply if not mounted
+    _callStatus = 'Ready'; // Or perhaps leave it as it was? Depends on desired behavior.
+    _isRecording = false;
+    _isPcmSoundPlaying = false; // ADDED
+    _isPlayingAudio = false;    // MODIFIED
   }
 
+  print(">>>> Call state reset complete. InCall: $_isInCall, Status: $_callStatus, PcmPlaying: $_isPcmSoundPlaying");
+}
   void setStateIfMounted(VoidCallback fn) {
     if (mounted) {
       setState(fn);
@@ -1841,10 +1732,10 @@ Future<void> _stopAudioPlayer() async {
                       ),
                       const SizedBox(width: 20),
                       Icon(
-                        _isPlayingAudio
+                        _isPcmSoundPlaying
                             ? Icons.graphic_eq
                             : Icons.volume_mute,
-                        color: _isPlayingAudio ? Colors.blue : Colors.grey,
+                        color: _isPcmSoundPlaying ? Colors.blue : Colors.grey,
                         size: 20,
                       ),
                     ],
