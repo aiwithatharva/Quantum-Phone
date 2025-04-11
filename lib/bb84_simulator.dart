@@ -38,19 +38,19 @@ class BB84Simulator {
   }
 
   void startExchange() {
-    print("BB84: Starting exchange (Role: ${isAlice ? 'Alice' : 'Bob'})");
+    // print("BB84: Starting exchange (Role: ${isAlice ? 'Alice' : 'Bob'})");
     reset(); // Ensure clean state
 
     if (isAlice) {
       _aliceBits = _generateRandomSequence(keyLength);
       _aliceBases = _generateRandomSequence(keyLength);
-      print("BB84 Alice: Generated ${_aliceBits!.length} bits and bases.");
+      // print("BB84 Alice: Generated ${_aliceBits!.length} bits and bases.");
       // Alice waits for Bob to be ready or sends her bases directly
       // For simplicity, let's have Alice send bases first in this simulation
        _sendBases();
     } else {
       _bobBases = _generateRandomSequence(keyLength);
-      print("BB84 Bob: Generated ${_bobBases!.length} bases.");
+      // print("BB84 Bob: Generated ${_bobBases!.length} bases.");
       // Bob sends his bases (or a ready signal)
        _sendBases(); // Both send bases simultaneously in this simple model
     }
@@ -62,7 +62,7 @@ class BB84Simulator {
     // data can be List<dynamic> for bases or siftedBits
     final data = signal['data'];
 
-    print("BB84: Processing signal type '$type'");
+    // print("BB84: Processing signal type '$type'");
 
     switch (type) {
       case 'bases':
@@ -70,14 +70,14 @@ class BB84Simulator {
           try {
               _peerBases = data.map((e) => e as int).toList();
               _basesReceived = true;
-              print("BB84: Received ${_peerBases?.length ?? 0} bases from peer.");
+              // print("BB84: Received ${_peerBases?.length ?? 0} bases from peer.");
               _checkAndCompareBases();
           } catch (e) {
-              print("BB84 Error: Received bases data is not List<int>. $e");
+              // print("BB84 Error: Received bases data is not List<int>. $e");
               _abortExchange("Invalid bases format received");
           }
         } else {
-          print("BB84 Error: Received bases data is not a List.");
+          // print("BB84 Error: Received bases data is not a List.");
             _abortExchange("Invalid bases format received");
         }
         break;
@@ -88,26 +88,26 @@ class BB84Simulator {
           if (data is List) {
               try {
                 _receivedSiftedBits = data.map((e) => e as int).toList();
-                print("BB84 Bob: Received ${_receivedSiftedBits!.length} sifted bits from Alice.");
+                // print("BB84 Bob: Received ${_receivedSiftedBits!.length} sifted bits from Alice.");
                 // Now that Bob has the bits, proceed to hashing
                 _hashReceivedSiftedKey();
               } catch (e) {
-                print("BB84 Error: Received siftedBits data is not List<int>. $e");
+                // print("BB84 Error: Received siftedBits data is not List<int>. $e");
                   _abortExchange("Invalid siftedBits format received");
               }
           } else {
-              print("BB84 Error: Received siftedBits data is not a List.");
+              // print("BB84 Error: Received siftedBits data is not a List.");
               _abortExchange("Invalid siftedBits format received");
           }
         } else {
-          print("BB84 Alice: Ignored own siftedBits message."); // Should not happen
+          // print("BB84 Alice: Ignored own siftedBits message."); // Should not happen
         }
         break;
       // --- END NEW CASE ---
 
       // Add other signal types if needed (e.g., for error correction steps)
       default:
-        print("BB84: Unknown signal type '$type'");
+        // print("BB84: Unknown signal type '$type'");
     }
   }
 
@@ -116,7 +116,7 @@ class BB84Simulator {
 
      List<int>? basesToSend = isAlice ? _aliceBases : _bobBases;
      if (basesToSend != null) {
-        print("BB84: Sending bases...");
+        // print("BB84: Sending bases...");
         sendSignal({
            'type': 'bases',
            'data': basesToSend, // Send the list of bases
@@ -124,17 +124,17 @@ class BB84Simulator {
         _basesSent = true;
         _checkAndCompareBases(); // Check if ready to compare
      } else {
-        print("BB84 Error: Tried to send null bases.");
+        // print("BB84 Error: Tried to send null bases.");
      }
   }
 
    void _checkAndCompareBases() {
       // Proceed only if both sent and received bases
       if (_basesSent && _basesReceived && _peerBases != null) {
-         print("BB84: Both parties have exchanged bases. Comparing...");
+         // print("BB84: Both parties have exchanged bases. Comparing...");
          _compareBases();
       } else {
-          print("BB84: Waiting for peer's bases...");
+          // print("BB84: Waiting for peer's bases...");
       }
    }
 
@@ -158,7 +158,7 @@ class BB84Simulator {
         }
       }
 
-      print("BB84: Bases compared. Found ${_siftedKeyIndices!.length} matching bases (sifted key length).");
+      // print("BB84: Bases compared. Found ${_siftedKeyIndices!.length} matching bases (sifted key length).");
 
       // --- MODIFIED LOGIC ---
       if (_siftedKeyIndices!.isEmpty) {
@@ -168,12 +168,12 @@ class BB84Simulator {
 
       // Alice proceeds to extract, send, and hash her bits
       if (isAlice) {
-          print("BB84 Alice: Preparing to send sifted bits and hash key.");
+          // print("BB84 Alice: Preparing to send sifted bits and hash key.");
         _performSiftingAndHashing(); // Alice calculates, sends, and hashes
       } else {
         // Bob WAITS for Alice to send the sifted bits.
         // The hashing will be triggered by the 'siftedBits' message in processSignal.
-        print("BB84 Bob: Waiting for sifted bits from Alice...");
+        // print("BB84 Bob: Waiting for sifted bits from Alice...");
       }
       // --- END MODIFIED LOGIC ---
 
@@ -187,7 +187,7 @@ class BB84Simulator {
 
      if (!isAlice) {
          // This path should ideally not be hit anymore due to changes in _compareBases
-         print("BB84 Warning: _performSiftingAndHashing called unexpectedly by Bob.");
+         // print("BB84 Warning: _performSiftingAndHashing called unexpectedly by Bob.");
          // If it does get called, ensure we don't use the old faulty logic
          _abortExchange("Internal logic error: Bob tried to perform sifting directly.");
          return;
@@ -204,10 +204,10 @@ class BB84Simulator {
 
      // 1. Extract Sifted Bits
      List<int> siftedKeyBits = _siftedKeyIndices!.map((index) => _aliceBits![index]).toList();
-     print("BB84 Alice: Extracted ${siftedKeyBits.length} sifted bits.");
+     // print("BB84 Alice: Extracted ${siftedKeyBits.length} sifted bits.");
 
      // 2. Send Sifted Bits to Bob
-     print("BB84 Alice: Sending ${siftedKeyBits.length} sifted bits to Bob...");
+     // print("BB84 Alice: Sending ${siftedKeyBits.length} sifted bits to Bob...");
      sendSignal({
          'type': 'siftedBits',
          'data': siftedKeyBits,
@@ -225,14 +225,14 @@ class BB84Simulator {
  // --- NEW Function for Bob (called from processSignal) ---
  void _hashReceivedSiftedKey() {
      if (isAlice) {
-         print("BB84 Warning: _hashReceivedSiftedKey called by Alice.");
+         // print("BB84 Warning: _hashReceivedSiftedKey called by Alice.");
          return; // Should not happen
      }
      if (_receivedSiftedBits == null) {
          _abortExchange("Bob cannot hash: Sifted bits not received.");
          return;
      }
-      print("BB84 Bob: Proceeding to hash received sifted bits.");
+      // print("BB84 Bob: Proceeding to hash received sifted bits.");
 
      if (_receivedSiftedBits!.length < minFinalKeyLengthBytes * 8) {
          _abortExchange("Bob: Received sifted key too short (${_receivedSiftedBits!.length} bits).");
@@ -261,7 +261,7 @@ class BB84Simulator {
      final digest = SHA256Digest();
      _derivedKey = digest.process(siftedBytes); // Result is 32 bytes (256 bits)
 
-     print("BB84 $role: Derived final key (SHA-256 hash): ${_derivedKey?.length} bytes.");
+     // print("BB84 $role: Derived final key (SHA-256 hash): ${_derivedKey?.length} bytes.");
 
      if (_derivedKey != null && _derivedKey!.length >= minFinalKeyLengthBytes) {
          onKeyDerived(_derivedKey); // Success! Pass key back.
@@ -270,7 +270,7 @@ class BB84Simulator {
      }
  }
    void _abortExchange(String reason) {
-       print("BB84 Error: Aborting exchange - $reason");
+       // print("BB84 Error: Aborting exchange - $reason");
        reset();
        onKeyDerived(null); // Signal failure
    }
